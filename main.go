@@ -3,18 +3,10 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"os"
 )
 
 func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		appOwner := os.Getenv("APP_OWNER")
-		if appOwner == "" {
-			appOwner = "Environment variable APP_OWNER is not set"
-		} else {
-			appOwner = "App Owner: " + appOwner
-		}
-
 		// HTML content
 		html := fmt.Sprintf(`
 			<!DOCTYPE html>
@@ -49,27 +41,22 @@ func main() {
 						color: #666;
 						font-size: 16px;
 					}
-					.env-info {
-						margin-top: 20px;
-						color: #007acc;
-					}
 				</style>
 			</head>
 			<body>
 				<div class="container">
 					<h1>Welcome to the Sample Go App</h1>
 					<p>This is a simple static site served using Go.</p>
-					<p class="env-info">ENV: %s</p>
 				</div>
 			</body>
-			</html>`, appOwner)
+			</html>`)
 
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, html)
 	})
 
-	port := ":8000"
-	fmt.Println("Server is running at http://localhost" + port)
+	port := ":9000"
+	fmt.Println("Server is running at : " + port)
 	err := http.ListenAndServe(port, nil)
 	if err != nil {
 		fmt.Println("Error starting server:", err)

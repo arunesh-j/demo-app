@@ -7,18 +7,16 @@ on:
     branches: [ main ]
 
 env:
-  SERVICE_NAME: go-staticapp
-  NAMESPACE: demo-app-stage
-  CLUSTER_NAME: demo-cluster
-  CLUSTER_PROJECT: zopdev-test
-  GAR_PROJECT: zopdev-test
-  GAR_REGISTRY: zop-dev
+  SERVICE_NAME: deploy-serv
+  NAMESPACE: demo-app-dev
+  CLUSTER_NAME: demo-k8s
+  ARTIFACT_REPO_NAME: zop-dev
+
 
 jobs:
   dockerize:
     runs-on: ubuntu-latest
     name: 🐳 Dockerize
-
     outputs:
       image: ${{ steps.output-image.outputs.image }}
     steps:
@@ -26,60 +24,133 @@ jobs:
       - uses: actions/setup-go@v4
         with:
           go-version: '1.21'
-      - name: Get dependencies
-        run: |
-          go mod download
 
-      - name: Build
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Build Go Binary
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -o main
 
-      - name: Login to GAR
-        uses: docker/login-action@v2
-        with:
-          registry: us-central1-docker.pkg.dev
-          username: _json_key
-          password: ${{ secrets.GO_STATICAPP_DEMO_APP_STAGE_DEPLOYMENT_KEY }}
+      - name: Setup OCI CLI Config
+        run: |
+          mkdir -p ~/.oci
 
-      - name: Build and Push Docker Image to GAR
-        uses: docker/build-push-action@v2
+          echo '${{ secrets.DEPLOY_SERV_DEMO_APP_DEV_DEPLOYMENT_KEY }}' > /tmp/creds.json
+          
+          jq -r '.private_key' /tmp/creds.json > ~/.oci/private_key.pem
+          chmod 600 ~/.oci/private_key.pem
+
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=$(jq -r '.user_ocid' /tmp/creds.json)
+          fingerprint=$(jq -r '.fingerprint' /tmp/creds.json)
+          tenancy=$(jq -r '.tenancy_ocid' /tmp/creds.json)
+          region=$(jq -r '.region' /tmp/creds.json)
+          key_file=~/.oci/private_key.pem
+          pass_phrase="N/A"
+          EOF
+
+      - name: Install OCI CLI
+        run: |
+          curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh | bash -s -- --accept-all-defaults
+          echo "$HOME/bin" >> $GITHUB_PATH
+          source ~/.bashrc || true
+          
+      - name: Test OCI CLI Access
+        run: |
+          oci os ns get --config-file ~/.oci/config --profile DEFAULT
+
+      - name: Extract OCIR credentials
+        id: extract-vars
+        run: |
+          echo "region=$(jq -r '.region' /tmp/creds.json)" >> $GITHUB_OUTPUT
+          echo "username=$(jq -r '.oar_username' /tmp/creds.json)" >> $GITHUB_OUTPUT
+          echo "auth_token=$(jq -r '.oar_password' /tmp/creds.json)" >> $GITHUB_OUTPUT
+          echo "tenancy_namespace=$(jq -r '.oar_username' /tmp/creds.json | cut -d'/' -f1)" >> $GITHUB_OUTPUT
+
+      - name: Login to OCIR
+        uses: docker/login-action@v3
         with:
-          push: true
-          context: .
-          file: ./Dockerfile
-          tags:
-            us-central1-docker.pkg.dev/${{ env.GAR_PROJECT }}/${{ env.GAR_REGISTRY }}/${{ env.NAMESPACE }}/${{ env.SERVICE_NAME }}:${{ github.sha }}
+          registry: ${{ steps.extract-vars.outputs.region }}.ocir.io
+          username: ${{ steps.extract-vars.outputs.username }}
+          password: ${{ steps.extract-vars.outputs.auth_token }}
+
+      - name: Build and Push Docker Image
+        run: |
+          REGION=$(jq -r '.region' /tmp/creds.json)
+          IMAGE_URL="${REGION}.ocir.io/${{ steps.extract-vars.outputs.tenancy_namespace }}/${{ env.ARTIFACT_REPO_NAME }}/${{ env.SERVICE_NAME }}:${{ github.sha }}"
+
+          docker build -t ${IMAGE_URL} .
+          docker push ${IMAGE_URL}
+
+          docker tag ${IMAGE_URL} "${REGION}.ocir.io/${{ steps.extract-vars.outputs.tenancy_namespace }}/${{ env.ARTIFACT_REPO_NAME }}/${{ env.SERVICE_NAME }}:latest"
+          docker push "${REGION}.ocir.io/${{ steps.extract-vars.outputs.tenancy_namespace }}/${{ env.ARTIFACT_REPO_NAME }}/${{ env.SERVICE_NAME }}:latest"
+
       - id: output-image
-        run: 
-          echo "image=`echo us-central1-docker.pkg.dev/${{ env.GAR_PROJECT }}/${{ env.GAR_REGISTRY }}/${{ env.NAMESPACE }}/${{ env.SERVICE_NAME }}:${{ github.sha }}`" >> "$GITHUB_OUTPUT"
-
+        run: |
+          REGION=$(jq -r '.region' /tmp/creds.json)
+          echo "image=${REGION}.ocir.io/${{ steps.extract-vars.outputs.tenancy_namespace }}/${{ env.ARTIFACT_REPO_NAME }}/${{ env.SERVICE_NAME }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
   deployment:
     runs-on: ubuntu-latest
     needs: dockerize
     name: 🚀 Deploy
     env:
       image: ${{ needs.dockerize.outputs.image }}
-
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: Authorize to GCP service account
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GO_STATICAPP_DEMO_APP_STAGE_DEPLOYMENT_KEY }}
+      - name: Setup OCI CLI Config
+        run: |
+          mkdir -p ~/.oci
 
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
+          echo '${{ secrets.DEPLOY_SERV_DEMO_APP_DEV_DEPLOYMENT_KEY }}' > /tmp/creds.json
+          
+          jq -r '.private_key' /tmp/creds.json > ~/.oci/private_key.pem
+          chmod 600 ~/.oci/private_key.pem
 
-      - name: Update Kubectl component
-        run: gcloud --quiet components update kubectl
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=$(jq -r '.user_ocid' /tmp/creds.json)
+          fingerprint=$(jq -r '.fingerprint' /tmp/creds.json)
+          tenancy=$(jq -r '.tenancy_ocid' /tmp/creds.json)
+          region=$(jq -r '.region' /tmp/creds.json)
+          key_file=~/.oci/private_key.pem
+          pass_phrase="N/A"
+          EOF
 
-      - name: Set GCloud Project and Fetch Cluster Credentials
-        run:
-          gcloud container clusters get-credentials ${{ env.CLUSTER_NAME }} --region=us-central1 --project=${{ env.CLUSTER_PROJECT }}
+      - name: Install OCI CLI
+        run: |
+          curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh | bash -s -- --accept-all-defaults
+          echo "$HOME/bin" >> $GITHUB_PATH
+          source ~/.bashrc || true
 
-      - name: Update Deployment Image
-        run: 
+      - name: Test OCI CLI Access
+        run: |
+          oci os ns get --config-file ~/.oci/config --profile DEFAULT
+
+      - name: Install and Configure kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+
+      - name: Set Up OKE Kubeconfig
+        run: |
+          REGION=$(jq -r '.region' /tmp/creds.json)
+          CLUSTER_OCID=$(jq -r '.cluster_ocid' /tmp/creds.json)
+
+          oci ce cluster create-kubeconfig --cluster-id ${CLUSTER_OCID} --file $HOME/.kube/config --region ${REGION} --token-version 2.0.0  --kube-endpoint PUBLIC_ENDPOINT
+            
+      - name: Set Image Pull Secret
+        run: |
+          kubectl patch deployment/${{ env.SERVICE_NAME }} -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"ocirsecret"}]}}}}' --namespace ${{ env.NAMESPACE }}
+
+      - name: Update Deployment
+        run: |
           kubectl set image deployment/${{ env.SERVICE_NAME }} ${{ env.SERVICE_NAME }}=${{ env.image }} --namespace ${{ env.NAMESPACE }}
-  
+
+      - name: Verify Rollout
+        run: |
+          kubectl rollout status deployment/${{ env.SERVICE_NAME }} --namespace ${{ env.NAMESPACE }} --timeout=300s
